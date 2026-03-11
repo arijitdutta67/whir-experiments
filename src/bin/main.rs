@@ -1,37 +1,30 @@
-use std::time::Instant;
+use std::{borrow::Cow, time::Instant};
 
-use ark_crypto_primitives::{
-    crh::{CRHScheme, TwoToOneCRHScheme},
-    merkle_tree::Config,
-};
 use ark_ff::FftField;
-use ark_serialize::CanonicalSerialize;
-use nimue::{DefaultHash, IOPattern};
-use whir::{
-    cmdline_utils::{AvailableFields, AvailableMerkle, WhirType},
-    crypto::{
-        fields,
-        merkle_tree::{self, HashCounter},
-    },
-    parameters::*,
-    poly_utils::{coeffs::CoefficientList, MultilinearPoint},
-};
-
-use nimue_pow::blake3::Blake3PoW;
-
 use clap::Parser;
+use whir::{
+    algebra::{
+        embedding::{Basefield, Embedding, Identity},
+        fields::{Field128, Field192, Field256, Field64, Field64_2, Field64_3},
+        linear_form::{Covector, Evaluate, LinearForm, MultilinearExtension},
+        MultilinearPoint,
+    },
+    bits::Bits,
+    cmdline_utils::{AvailableFields, AvailableHash},
+    hash::HASH_COUNTER,
+    parameters::ProtocolParameters,
+    transcript::{codecs::Empty, Codec, DomainSeparator, ProverState, VerifierState},
+};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    #[arg(short = 't', long = "type", default_value = "PCS")]
-    protocol_type: WhirType,
-
-    #[arg(short = 'l', long, default_value = "100")]
+    #[arg(short = 'l', long, default_value = "128")]
     security_level: usize,
 
-    #[arg(short = 'p', long)]
-    pow_bits: Option<usize>,
+    /// Maximum proof of work difficulty in bits.
+    #[arg(short = 'p', long, default_value = "20")]
+    pow_bits: usize,
 
     #[arg(short = 'd', long, default_value = "20")]
     num_variables: usize,
@@ -39,356 +32,186 @@ struct Args {
     #[arg(short = 'e', long = "evaluations", default_value = "1")]
     num_evaluations: usize,
 
+    #[arg(long = "linear-constraints", default_value = "0")]
+    num_linear_constraints: usize,
+
     #[arg(short = 'r', long, default_value = "1")]
     rate: usize,
 
     #[arg(long = "reps", default_value = "1000")]
     verifier_repetitions: usize,
 
+    #[arg(short = 'i', long = "initfold", default_value = "4")]
+    first_round_folding_factor: usize,
+
     #[arg(short = 'k', long = "fold", default_value = "4")]
     folding_factor: usize,
 
-    #[arg(long = "sec", default_value = "ConjectureList")]
-    soundness_type: SoundnessType,
+    /// Restrict PCS to the Unique Decoding regime. LDT is always UD.
+    #[arg(long = "unique-decoding", default_value_t = false)]
+    unique_decoding: bool,
 
-    #[arg(long = "fold_type", default_value = "ProverHelps")]
-    fold_optimisation: FoldType,
-
-    #[arg(short = 'f', long = "field", default_value = "Goldilocks2")]
+    #[arg(short = 'f', long = "field", default_value = "Goldilocks3")]
     field: AvailableFields,
 
     #[arg(long = "hash", default_value = "Blake3")]
-    merkle_tree: AvailableMerkle,
-}
+    hash: AvailableHash,
 
-type PowStrategy = Blake3PoW;
+    #[arg(long = "zk")]
+    zk: bool,
+}
 
 fn main() {
-    let mut args = Args::parse();
+    use AvailableFields as AF;
+    let args = Args::parse();
     let field = args.field;
-    let merkle = args.merkle_tree;
 
-    if args.pow_bits.is_none() {
-        args.pow_bits = Some(default_max_pow(args.num_variables, args.rate));
-    }
-
-    let mut rng = ark_std::test_rng();
-
-    match (field, merkle) {
-        (AvailableFields::Goldilocks1, AvailableMerkle::Blake3) => {
-            use fields::Field64 as F;
-            use merkle_tree::blake3 as mt;
-
-            let (leaf_hash_params, two_to_one_params) = mt::default_config::<F>(&mut rng);
-            run_whir::<F, mt::MerkleTreeParams<F>>(args, leaf_hash_params, two_to_one_params);
+    // Dispatch on embedding
+    if args.zk {
+        match field {
+            AF::Goldilocks1 => run_whir_zk::<Field64>(&args),
+            AF::Goldilocks2 => run_whir_zk::<Field64_2>(&args),
+            AF::Goldilocks3 => run_whir_zk::<Field64_3>(&args),
+            AF::Field128 => run_whir_zk::<Field128>(&args),
+            AF::Field192 => run_whir_zk::<Field192>(&args),
+            AF::Field256 => run_whir_zk::<Field256>(&args),
         }
-
-        (AvailableFields::Goldilocks1, AvailableMerkle::Keccak256) => {
-            use fields::Field64 as F;
-            use merkle_tree::keccak as mt;
-
-            let (leaf_hash_params, two_to_one_params) = mt::default_config::<F>(&mut rng);
-            run_whir::<F, mt::MerkleTreeParams<F>>(args, leaf_hash_params, two_to_one_params);
-        }
-
-        (AvailableFields::Goldilocks2, AvailableMerkle::Blake3) => {
-            use fields::Field64_2 as F;
-            use merkle_tree::blake3 as mt;
-
-            let (leaf_hash_params, two_to_one_params) = mt::default_config::<F>(&mut rng);
-            run_whir::<F, mt::MerkleTreeParams<F>>(args, leaf_hash_params, two_to_one_params);
-        }
-
-        (AvailableFields::Goldilocks2, AvailableMerkle::Keccak256) => {
-            use fields::Field64_2 as F;
-            use merkle_tree::keccak as mt;
-
-            let (leaf_hash_params, two_to_one_params) = mt::default_config::<F>(&mut rng);
-            run_whir::<F, mt::MerkleTreeParams<F>>(args, leaf_hash_params, two_to_one_params);
-        }
-
-        (AvailableFields::Goldilocks3, AvailableMerkle::Blake3) => {
-            use fields::Field64_3 as F;
-            use merkle_tree::blake3 as mt;
-
-            let (leaf_hash_params, two_to_one_params) = mt::default_config::<F>(&mut rng);
-            run_whir::<F, mt::MerkleTreeParams<F>>(args, leaf_hash_params, two_to_one_params);
-        }
-
-        (AvailableFields::Goldilocks3, AvailableMerkle::Keccak256) => {
-            use fields::Field64_3 as F;
-            use merkle_tree::keccak as mt;
-
-            let (leaf_hash_params, two_to_one_params) = mt::default_config::<F>(&mut rng);
-            run_whir::<F, mt::MerkleTreeParams<F>>(args, leaf_hash_params, two_to_one_params);
-        }
-
-        (AvailableFields::Field128, AvailableMerkle::Blake3) => {
-            use fields::Field128 as F;
-            use merkle_tree::blake3 as mt;
-
-            let (leaf_hash_params, two_to_one_params) = mt::default_config::<F>(&mut rng);
-            run_whir::<F, mt::MerkleTreeParams<F>>(args, leaf_hash_params, two_to_one_params);
-        }
-
-        (AvailableFields::Field128, AvailableMerkle::Keccak256) => {
-            use fields::Field128 as F;
-            use merkle_tree::keccak as mt;
-
-            let (leaf_hash_params, two_to_one_params) = mt::default_config::<F>(&mut rng);
-            run_whir::<F, mt::MerkleTreeParams<F>>(args, leaf_hash_params, two_to_one_params);
-        }
-
-        (AvailableFields::Field192, AvailableMerkle::Blake3) => {
-            use fields::Field192 as F;
-            use merkle_tree::blake3 as mt;
-
-            let (leaf_hash_params, two_to_one_params) = mt::default_config::<F>(&mut rng);
-            run_whir::<F, mt::MerkleTreeParams<F>>(args, leaf_hash_params, two_to_one_params);
-        }
-
-        (AvailableFields::Field192, AvailableMerkle::Keccak256) => {
-            use fields::Field192 as F;
-            use merkle_tree::keccak as mt;
-
-            let (leaf_hash_params, two_to_one_params) = mt::default_config::<F>(&mut rng);
-            run_whir::<F, mt::MerkleTreeParams<F>>(args, leaf_hash_params, two_to_one_params);
-        }
-
-        (AvailableFields::Field256, AvailableMerkle::Blake3) => {
-            use fields::Field256 as F;
-            use merkle_tree::blake3 as mt;
-
-            let (leaf_hash_params, two_to_one_params) = mt::default_config::<F>(&mut rng);
-            run_whir::<F, mt::MerkleTreeParams<F>>(args, leaf_hash_params, two_to_one_params);
-        }
-
-        (AvailableFields::Field256, AvailableMerkle::Keccak256) => {
-            use fields::Field256 as F;
-            use merkle_tree::keccak as mt;
-
-            let (leaf_hash_params, two_to_one_params) = mt::default_config::<F>(&mut rng);
-            run_whir::<F, mt::MerkleTreeParams<F>>(args, leaf_hash_params, two_to_one_params);
+    } else {
+        match field {
+            AF::Goldilocks1 => run_whir::<Identity<Field64>>(&args),
+            AF::Goldilocks2 => run_whir::<Basefield<Field64_2>>(&args),
+            AF::Goldilocks3 => run_whir::<Basefield<Field64_3>>(&args),
+            AF::Field128 => run_whir::<Identity<Field128>>(&args),
+            AF::Field192 => run_whir::<Identity<Field192>>(&args),
+            AF::Field256 => run_whir::<Identity<Field256>>(&args),
         }
     }
 }
 
-fn run_whir<F, MerkleConfig>(
-    args: Args,
-    leaf_hash_params: <<MerkleConfig as Config>::LeafHash as CRHScheme>::Parameters,
-    two_to_one_params: <<MerkleConfig as Config>::TwoToOneHash as TwoToOneCRHScheme>::Parameters,
-) where
-    F: FftField + CanonicalSerialize,
-    MerkleConfig: Config<Leaf = [F]> + Clone,
-    MerkleConfig::InnerDigest: AsRef<[u8]> + From<[u8; 32]>,
+#[allow(clippy::too_many_lines)]
+fn run_whir<M>(args: &Args)
+where
+    M: Embedding + Default,
+    M::Source: FftField,
+    M::Target: FftField + Codec,
 {
-    match args.protocol_type {
-        WhirType::PCS => run_whir_pcs::<F, MerkleConfig>(args, leaf_hash_params, two_to_one_params),
-        WhirType::LDT => {
-            run_whir_as_ldt::<F, MerkleConfig>(args, leaf_hash_params, two_to_one_params)
-        }
-    }
-}
-
-fn run_whir_as_ldt<F, MerkleConfig>(
-    args: Args,
-    leaf_hash_params: <<MerkleConfig as Config>::LeafHash as CRHScheme>::Parameters,
-    two_to_one_params: <<MerkleConfig as Config>::TwoToOneHash as TwoToOneCRHScheme>::Parameters,
-) where
-    F: FftField + CanonicalSerialize,
-    MerkleConfig: Config<Leaf = [F]> + Clone,
-    MerkleConfig::InnerDigest: AsRef<[u8]> + From<[u8; 32]>,
-{
-    use whir::whir_ldt::{
-        committer::Committer, iopattern::WhirIOPattern, parameters::WhirConfig, prover::Prover,
-        verifier::Verifier, whir_proof_size,
-    };
-
-    // Runs as a LDT
-    let security_level = args.security_level;
-    let pow_bits = args.pow_bits.unwrap();
-    let num_variables = args.num_variables;
-    let starting_rate = args.rate;
-    let reps = args.verifier_repetitions;
-    let folding_factor = args.folding_factor;
-    let fold_optimisation = args.fold_optimisation;
-    let soundness_type = args.soundness_type;
-
-    if args.num_evaluations > 1 {
-        println!("Warning: running as LDT but a number of evaluations to be proven was specified.");
-    }
-
-    let num_coeffs = 1 << num_variables;
-
-    let mv_params = MultivariateParameters::<F>::new(num_variables);
-
-    let whir_params = WhirParameters::<MerkleConfig, PowStrategy> {
-        security_level,
-        pow_bits,
-        folding_factor,
-        leaf_hash_params,
-        two_to_one_params,
-        soundness_type,
-        fold_optimisation,
-        _pow_parameters: Default::default(),
-        starting_log_inv_rate: starting_rate,
-    };
-
-    let params = WhirConfig::<F, MerkleConfig, PowStrategy>::new(mv_params, whir_params);
-
-    let io = IOPattern::<DefaultHash>::new("🌪️")
-        .commit_statement(&params)
-        .add_whir_proof(&params)
-        .clone();
-
-    let mut merlin = io.to_merlin();
-
-    println!("=========================================");
-    println!("Whir (LDT) 🌪️");
-    println!("Field: {:?} and MT: {:?}", args.field, args.merkle_tree);
-    println!("{}", params);
-    if !params.check_pow_bits() {
-        println!("WARN: more PoW bits required than what specified.");
-    }
-
-    use ark_ff::Field;
-    let polynomial = CoefficientList::new(
-        (0..num_coeffs)
-            .map(<F as Field>::BasePrimeField::from)
-            .collect(),
-    );
-
-    let whir_prover_time = Instant::now();
-
-    let committer = Committer::new(params.clone());
-    let witness = committer.commit(&mut merlin, polynomial).unwrap();
-
-    let prover = Prover(params.clone());
-
-    let proof = prover.prove(&mut merlin, witness).unwrap();
-
-    dbg!(whir_prover_time.elapsed());
-    dbg!(whir_proof_size(merlin.transcript(), &proof));
-
-    // Just not to count that initial inversion (which could be precomputed)
-    let verifier = Verifier::new(params);
-
-    HashCounter::reset();
-    let whir_verifier_time = Instant::now();
-    for _ in 0..reps {
-        let mut arthur = io.to_arthur(merlin.transcript());
-        verifier.verify(&mut arthur, &proof).unwrap();
-    }
-    dbg!(whir_verifier_time.elapsed() / reps as u32);
-    dbg!(HashCounter::get() as f64 / reps as f64);
-}
-
-fn run_whir_pcs<F, MerkleConfig>(
-    args: Args,
-    leaf_hash_params: <<MerkleConfig as Config>::LeafHash as CRHScheme>::Parameters,
-    two_to_one_params: <<MerkleConfig as Config>::TwoToOneHash as TwoToOneCRHScheme>::Parameters,
-) where
-    F: FftField + CanonicalSerialize,
-    MerkleConfig: Config<Leaf = [F]> + Clone,
-    MerkleConfig::InnerDigest: AsRef<[u8]> + From<[u8; 32]>,
-{
-    use whir::whir::{
-        committer::Committer, iopattern::WhirIOPattern, parameters::WhirConfig, prover::Prover,
-        verifier::Verifier, whir_proof_size, Statement,
-    };
+    use whir::protocols::whir::Config;
 
     // Runs as a PCS
     let security_level = args.security_level;
-    let pow_bits = args.pow_bits.unwrap();
+    let pow_bits = args.pow_bits;
     let num_variables = args.num_variables;
     let starting_rate = args.rate;
     let reps = args.verifier_repetitions;
+    let first_round_folding_factor = args.first_round_folding_factor;
     let folding_factor = args.folding_factor;
-    let fold_optimisation = args.fold_optimisation;
-    let soundness_type = args.soundness_type;
+    let unique_decoding = args.unique_decoding;
     let num_evaluations = args.num_evaluations;
+    let num_linear_constraints = args.num_linear_constraints;
+    let hash_id = args.hash.hash_id();
 
-    if num_evaluations == 0 {
-        println!("Warning: running as PCS but no evaluations specified.");
+    if num_evaluations + num_linear_constraints == 0 {
+        println!("No constraints specified, running as low-degree-test.");
     }
 
     let num_coeffs = 1 << num_variables;
 
-    let mv_params = MultivariateParameters::<F>::new(num_variables);
-
-    let whir_params = WhirParameters::<MerkleConfig, PowStrategy> {
+    let whir_params = ProtocolParameters {
         security_level,
         pow_bits,
+        initial_folding_factor: first_round_folding_factor,
         folding_factor,
-        leaf_hash_params,
-        two_to_one_params,
-        soundness_type,
-        fold_optimisation,
-        _pow_parameters: Default::default(),
+        unique_decoding,
         starting_log_inv_rate: starting_rate,
+        batch_size: 1,
+        hash_id,
     };
 
-    let params = WhirConfig::<F, MerkleConfig, PowStrategy>::new(mv_params, whir_params);
+    let params = Config::<M>::new(1 << num_variables, &whir_params);
 
-    let io = IOPattern::<DefaultHash>::new("🌪️")
-        .commit_statement(&params)
-        .add_whir_proof(&params)
-        .clone();
+    let ds = DomainSeparator::protocol(&params)
+        .session(&format!("Example at {}:{}", file!(), line!()))
+        .instance(&Empty);
 
-    let mut merlin = io.to_merlin();
+    let mut prover_state = ProverState::new_std(&ds);
 
     println!("=========================================");
     println!("Whir (PCS) 🌪️");
-    println!("Field: {:?} and MT: {:?}", args.field, args.merkle_tree);
-    println!("{}", params);
-    if !params.check_pow_bits() {
-        println!("WARN: more PoW bits required than what specified.");
+    println!("Field: {:?} and hash: {:?}", args.field, args.hash);
+    println!("{params}");
+    if !params.check_max_pow_bits(Bits::new(whir_params.pow_bits as f64)) {
+        println!("WARN: more PoW bits required than specified.");
     }
 
-    use ark_ff::Field;
-    let polynomial = CoefficientList::new(
-        (0..num_coeffs)
-            .map(<F as Field>::BasePrimeField::from)
-            .collect(),
-    );
+    let vector = (0..num_coeffs).map(M::Source::from).collect::<Vec<_>>();
+
+    let whir_commit_time = Instant::now();
+    let witness = params.commit(&mut prover_state, &[&vector]);
+    let whir_commit_time = whir_commit_time.elapsed();
+
+    // Allocate constraints
+    let mut linear_forms: Vec<Box<dyn Evaluate<M>>> = Vec::new();
+    let mut prove_linear_forms: Vec<Box<dyn LinearForm<M::Target>>> = Vec::new();
+    let mut evaluations = Vec::new();
+
+    // Linear constraint
+    // We do these first to benefit from buffer recycling.
+    for _ in 0..num_linear_constraints {
+        let linear_form = Box::new(Covector {
+            vector: (0..num_coeffs).map(M::Target::from).collect(),
+        });
+        evaluations.push(linear_form.evaluate(params.embedding(), &vector));
+        linear_forms.push(linear_form.clone());
+        prove_linear_forms.push(linear_form);
+    }
+
+    // Evaluation constraint
     let points: Vec<_> = (0..num_evaluations)
-        .map(|i| MultilinearPoint(vec![F::from(i as u64); num_variables]))
+        .map(|x| MultilinearPoint(vec![M::Target::from(x as u64); num_variables]))
         .collect();
-    let evaluations = points
-        .iter()
-        .map(|point| polynomial.evaluate_at_extension(&point))
-        .collect();
+    for point in &points {
+        let linear_form = Box::new(MultilinearExtension::new(point.0.clone()));
+        evaluations.push(linear_form.evaluate(params.embedding(), &vector));
+        linear_forms.push(linear_form.clone());
+        prove_linear_forms.push(linear_form);
+    }
 
-    let statement = Statement {
-        points,
-        evaluations,
-    };
+    let whir_prove_time = Instant::now();
+    let _ = params.prove(
+        &mut prover_state,
+        vec![Cow::Borrowed(vector.as_slice())],
+        vec![Cow::Owned(witness)],
+        prove_linear_forms,
+        Cow::Borrowed(evaluations.as_slice()),
+    );
+    let whir_prove_time = whir_prove_time.elapsed();
 
-    let whir_prover_time = Instant::now();
-
-    let committer = Committer::new(params.clone());
-    let witness = committer.commit(&mut merlin, polynomial).unwrap();
-
-    let prover = Prover(params.clone());
-
-    let proof = prover
-        .prove(&mut merlin, statement.clone(), witness)
-        .unwrap();
-
-    println!("Prover time: {:.1?}", whir_prover_time.elapsed());
+    let proof = prover_state.proof();
+    println!(
+        "Prover time: {whir_commit_time:.1?} + {whir_prove_time:.1?} = {:.1?}",
+        whir_commit_time + whir_prove_time,
+    );
     println!(
         "Proof size: {:.1} KiB",
-        whir_proof_size(merlin.transcript(), &proof) as f64 / 1024.0
+        (proof.narg_string.len() + proof.hints.len()) as f64 / 1024.0
     );
 
-    // Just not to count that initial inversion (which could be precomputed)
-    let verifier = Verifier::new(params);
-
-    HashCounter::reset();
+    HASH_COUNTER.reset();
     let whir_verifier_time = Instant::now();
     for _ in 0..reps {
-        let mut arthur = io.to_arthur(merlin.transcript());
-        verifier.verify(&mut arthur, &statement, &proof).unwrap();
+        let mut verifier_state = VerifierState::new_std(&ds, &proof);
+
+        let commitment = params.receive_commitment(&mut verifier_state).unwrap();
+        let final_claim = params
+            .verify(&mut verifier_state, &[&commitment], &evaluations)
+            .unwrap();
+        final_claim
+            .verify(
+                linear_forms
+                    .iter()
+                    .map(|w| w.as_ref() as &dyn LinearForm<M::Target>),
+            )
+            .unwrap();
     }
     println!(
         "Verifier time: {:.1?}",
@@ -396,6 +219,143 @@ fn run_whir_pcs<F, MerkleConfig>(
     );
     println!(
         "Average hashes: {:.1}k",
-        (HashCounter::get() as f64 / reps as f64) / 1000.0
+        (HASH_COUNTER.get() as f64 / reps as f64) / 1000.0
+    );
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_whir_zk<F>(args: &Args)
+where
+    F: FftField + Codec,
+{
+    use whir::protocols::whir_zk::Config;
+
+    let security_level = args.security_level;
+    let pow_bits = args.pow_bits;
+    let num_variables = args.num_variables;
+    let starting_rate = args.rate;
+    let reps = args.verifier_repetitions;
+    let first_round_folding_factor = args.first_round_folding_factor;
+    let folding_factor = args.folding_factor;
+    let num_evaluations = args.num_evaluations;
+    let num_linear_constraints = args.num_linear_constraints;
+    let hash_id = args.hash.hash_id();
+
+    if num_evaluations + num_linear_constraints == 0 {
+        println!("No constraints specified, running as low-degree-test.");
+    }
+
+    let num_coeffs = 1 << num_variables;
+
+    let whir_params = ProtocolParameters {
+        unique_decoding: args.unique_decoding,
+        security_level,
+        pow_bits,
+        initial_folding_factor: first_round_folding_factor,
+        folding_factor,
+        starting_log_inv_rate: starting_rate,
+        batch_size: 1,
+        hash_id,
+    };
+
+    let params = Config::<F>::new(1 << num_variables, &whir_params, 1);
+
+    let ds = DomainSeparator::protocol(&params)
+        .session(&format!("Example at {}:{}", file!(), line!()))
+        .instance(&Empty);
+
+    let mut prover_state = ProverState::new_std(&ds);
+
+    println!("=========================================");
+    println!("Whir (PCS + ZK) 🌪️");
+    println!("Field: {:?} and hash: {:?}", args.field, args.hash);
+    println!("{params}");
+    if !params
+        .blinded_commitment
+        .check_max_pow_bits(Bits::new(whir_params.pow_bits as f64))
+    {
+        println!("WARN: more PoW bits required than specified.");
+    }
+
+    let embedding = Identity::<F>::new();
+    let vector = (0..num_coeffs).map(F::from).collect::<Vec<_>>();
+
+    // Allocate constraints
+    let mut linear_forms: Vec<Box<dyn Evaluate<Basefield<F>>>> = Vec::new();
+    let mut prove_linear_forms: Vec<Box<dyn LinearForm<F>>> = Vec::new();
+    let mut evaluations = Vec::new();
+
+    // Linear constraint
+    // We do these first to benefit from buffer recycling.
+    for _ in 0..num_linear_constraints {
+        let linear_form = Box::new(Covector {
+            vector: (0..num_coeffs).map(F::from).collect(),
+        });
+        evaluations.push(linear_form.evaluate(&embedding, &vector));
+        linear_forms.push(linear_form.clone());
+        prove_linear_forms.push(linear_form);
+    }
+
+    // Evaluation constraint
+    let points: Vec<_> = (0..num_evaluations)
+        .map(|x| MultilinearPoint(vec![F::from(x as u64); num_variables]))
+        .collect();
+    for point in &points {
+        let linear_form = Box::new(MultilinearExtension::new(point.0.clone()));
+        evaluations.push(linear_form.evaluate(&embedding, &vector));
+        linear_forms.push(linear_form.clone());
+        prove_linear_forms.push(linear_form);
+    }
+
+    let whir_commit_time = Instant::now();
+    let witness = params.commit(&mut prover_state, &[vector.as_slice()]);
+    let whir_commit_time = whir_commit_time.elapsed();
+
+    let whir_prove_time = Instant::now();
+    let _ = params.prove(
+        &mut prover_state,
+        vec![Cow::Borrowed(&vector)],
+        witness,
+        prove_linear_forms,
+        Cow::Borrowed(&evaluations),
+    );
+    let whir_prove_time = whir_prove_time.elapsed();
+
+    let proof = prover_state.proof();
+    println!(
+        "Prover time: {whir_commit_time:.1?} + {whir_prove_time:.1?} = {:.1?}",
+        whir_commit_time + whir_prove_time,
+    );
+    println!(
+        "Proof size: {:.1} KiB",
+        (proof.narg_string.len() + proof.hints.len()) as f64 / 1024.0
+    );
+
+    let weight_dyn_refs = linear_forms
+        .iter()
+        .map(|w| w.as_ref() as &dyn LinearForm<F>)
+        .collect::<Vec<_>>();
+
+    HASH_COUNTER.reset();
+    let whir_verifier_time = Instant::now();
+    for _ in 0..reps {
+        let mut verifier_state = VerifierState::new_std(&ds, &proof);
+        let commitment = params.receive_commitments(&mut verifier_state, 1).unwrap();
+        params
+            .verify(
+                &mut verifier_state,
+                &weight_dyn_refs,
+                &evaluations,
+                &commitment,
+            )
+            .unwrap();
+    }
+    println!(
+        "Verifier time: {:.1?}",
+        whir_verifier_time.elapsed() / reps as u32
+    );
+    println!(
+        "Average hashes: {:.1}k",
+        (HASH_COUNTER.get() as f64 / reps as f64) / 1000.0
     );
 }

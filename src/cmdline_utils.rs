@@ -2,25 +2,7 @@ use std::str::FromStr;
 
 use serde::Serialize;
 
-#[derive(Debug, Clone, Copy, Serialize)]
-pub enum WhirType {
-    LDT,
-    PCS,
-}
-
-impl FromStr for WhirType {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s == "LDT" {
-            Ok(Self::LDT)
-        } else if s == "PCS" {
-            Ok(Self::PCS)
-        } else {
-            Err(format!("Invalid field: {}", s))
-        }
-    }
-}
+use crate::{engines::EngineId, hash};
 
 #[derive(Debug, Clone, Copy, Serialize)]
 pub enum AvailableFields {
@@ -36,40 +18,49 @@ impl FromStr for AvailableFields {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s == "Field128" {
-            Ok(Self::Field128)
-        } else if s == "Field192" {
-            Ok(Self::Field192)
-        } else if s == "Field256" {
-            Ok(Self::Field256)
-        } else if s == "Goldilocks1" {
-            Ok(Self::Goldilocks1)
-        } else if s == "Goldilocks2" {
-            Ok(Self::Goldilocks2)
-        } else if s == "Goldilocks3" {
-            Ok(Self::Goldilocks3)
-        } else {
-            Err(format!("Invalid field: {}", s))
+        match s {
+            "Field128" => Ok(Self::Field128),
+            "Field192" => Ok(Self::Field192),
+            "Field256" => Ok(Self::Field256),
+            "Goldilocks1" => Ok(Self::Goldilocks1),
+            "Goldilocks2" => Ok(Self::Goldilocks2),
+            "Goldilocks3" => Ok(Self::Goldilocks3),
+            _ => Err(format!("Invalid field: {s}")),
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
-pub enum AvailableMerkle {
-    Keccak256,
+pub enum AvailableHash {
+    Sha2,
+    Sha3,
+    Keccak,
     Blake3,
 }
 
-impl FromStr for AvailableMerkle {
+impl AvailableHash {
+    pub const fn hash_id(&self) -> EngineId {
+        match self {
+            Self::Sha2 => hash::SHA2,
+            Self::Sha3 => hash::SHA3,
+            Self::Keccak => hash::KECCAK,
+            Self::Blake3 => hash::BLAKE3,
+        }
+    }
+}
+
+impl FromStr for AvailableHash {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s == "Keccak" {
-            Ok(Self::Keccak256)
-        } else if s == "Blake3" {
-            Ok(Self::Blake3)
-        } else {
-            Err(format!("Invalid hash: {}", s))
+        match s {
+            "Sha2" => Ok(Self::Sha2),
+            "Sha3" => Ok(Self::Sha3),
+            "Keccak" => Ok(Self::Keccak),
+            "Blake3" => Ok(Self::Blake3),
+            _ => Err(format!(
+                "Invalid hash: {s}, options are: Sha2, Sha3, Keccak, Blake3"
+            )),
         }
     }
 }

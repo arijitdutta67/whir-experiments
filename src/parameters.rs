@@ -1,136 +1,47 @@
-use std::{fmt::Display, marker::PhantomData, str::FromStr};
+use std::fmt::{Debug, Display};
 
-use ark_crypto_primitives::merkle_tree::{Config, LeafParam, TwoToOneParam};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-pub fn default_max_pow(num_variables: usize, log_inv_rate: usize) -> usize {
-    num_variables + log_inv_rate - 3
-}
+use crate::engines::EngineId;
 
-#[derive(Debug, Clone, Copy, Serialize)]
-pub enum SoundnessType {
-    UniqueDecoding,
-    ProvableList,
-    ConjectureList,
-}
-
-impl Display for SoundnessType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match &self {
-                SoundnessType::ProvableList => "ProvableList",
-                SoundnessType::ConjectureList => "ConjectureList",
-                SoundnessType::UniqueDecoding => "UniqueDecoding",
-            }
-        )
-    }
-}
-
-impl FromStr for SoundnessType {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s == "ProvableList" {
-            Ok(SoundnessType::ProvableList)
-        } else if s == "ConjectureList" {
-            Ok(SoundnessType::ConjectureList)
-        } else if s == "UniqueDecoding" {
-            Ok(SoundnessType::UniqueDecoding)
-        } else {
-            Err(format!("Invalid soundness specification: {}", s))
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct MultivariateParameters<F> {
-    pub(crate) num_variables: usize,
-    _field: PhantomData<F>,
-}
-
-impl<F> MultivariateParameters<F> {
-    pub fn new(num_variables: usize) -> Self {
-        Self {
-            num_variables,
-            _field: PhantomData,
-        }
-    }
-}
-
-impl<F> Display for MultivariateParameters<F> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Number of variables: {}", self.num_variables)
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum FoldType {
-    Naive,
-    ProverHelps,
-}
-
-impl FromStr for FoldType {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s == "Naive" {
-            Ok(FoldType::Naive)
-        } else if s == "ProverHelps" {
-            Ok(FoldType::ProverHelps)
-        } else {
-            Err(format!("Invalid fold type specification: {}", s))
-        }
-    }
-}
-
-impl Display for FoldType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                FoldType::Naive => "Naive",
-                FoldType::ProverHelps => "ProverHelps",
-            }
-        )
-    }
-}
-
-#[derive(Clone)]
-pub struct WhirParameters<MerkleConfig, PowStrategy>
-where
-    MerkleConfig: Config,
-{
+/// Configuration parameters for WHIR proofs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtocolParameters {
+    /// Wheter to require unique decoding.
+    pub unique_decoding: bool,
+    /// The logarithmic inverse rate for sampling.
     pub starting_log_inv_rate: usize,
+    /// Folding factor for the initial round.
+    pub initial_folding_factor: usize,
+    /// Folding factor for rounds after the initial round.
     pub folding_factor: usize,
-    pub soundness_type: SoundnessType,
+    /// The security level in bits.
     pub security_level: usize,
+    /// The maximum number of bits required for proof-of-work (PoW).
     pub pow_bits: usize,
-
-    pub fold_optimisation: FoldType,
-
-    // PoW parameters
-    pub _pow_parameters: PhantomData<PowStrategy>,
-
-    // Merkle tree parameters
-    pub leaf_hash_params: LeafParam<MerkleConfig>,
-    pub two_to_one_params: TwoToOneParam<MerkleConfig>,
+    /// Number of vectors committed in the batch.
+    pub batch_size: usize,
+    /// Hash function identifier.
+    pub hash_id: EngineId,
 }
 
-impl<MerkleConfig, PowStrategy> Display for WhirParameters<MerkleConfig, PowStrategy>
-where
-    MerkleConfig: Config,
-{
+impl Display for ProtocolParameters {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(
             f,
-            "Targeting {}-bits of security with {}-bits of PoW - soundness: {:?}",
-            self.security_level, self.pow_bits, self.soundness_type
+            "Targeting {}-bits of security with {}-bits of PoW using {} decoding",
+            self.security_level,
+            self.pow_bits,
+            if self.unique_decoding {
+                "unique"
+            } else {
+                "list"
+            }
         )?;
         writeln!(
             f,
-            "Starting rate: 2^-{}, folding_factor: {}, fold_opt_type: {}",
-            self.starting_log_inv_rate, self.folding_factor, self.fold_optimisation,
+            "Starting rate: 2^-{}, initial_folding_factor: {}, folding_factor: {}",
+            self.starting_log_inv_rate, self.initial_folding_factor, self.folding_factor,
         )
     }
 }
